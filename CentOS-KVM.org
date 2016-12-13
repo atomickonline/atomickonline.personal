@@ -1,0 +1,372 @@
+#+TITLE: CentOS - Virtualization
+
+CENTOS-KVM:
+1) Disable NetworkManager, enable network
+2) Disable firewalld, enable iptables
+3) vi /etc/selinux/config set to disabled
+4) install watchdog, start and enable it
+5) reboot
+   
+
+CENTOS Update Kernel
+http://unix.stackexchange.com/questions/200574/centos-7-1-still-using-outdate-kernel-3-10-how-to-upgrade-to-kernel-4-0
+
+* Disk Resizing
+  : qemu-img resize disk.qcow2 +10G
+  : 
+  : parted /dev/vda
+  : mkpart primary xxxMB 100%
+  : quit
+  : 
+  : pvcreate /dev/vda3
+  : vgextend centos /dev/vda3
+  : lvcreate -l 100%FREE centos -n opt /dev/vda3
+  : 
+  : mkfs.xfs /dev/mapper/centos-opt
+
+  : vi /etc/fstab
+  : /dev/mapper/centos-opt /opt xfs defaults 1 1
+
+* Quick VM Spin Up
+  qemu-img create -b BASE.qcow2 -f qcow2 newvm.qcow2
+  i.e. If you have created a Windows 2k12 template: *win2k12.qcow2*
+  ~qemu-img create -b win2k12r2.qcow2 -f qcow2 prodadc01.qcow2~
+
+* KERNEL SHIT
+  https://www.centos.org/docs/5/html/Deployment_Guide-en-US/ch-kernel.html
+** UPDATE
+You could upgrade the kernel via elrepo.
+: rpm --import https://www.elrepo.org/RPM-GPG-KEY-elrepo.org
+: rpm -Uvh http://www.elrepo.org/elrepo-release-7.0-2.el7.elrepo.noarch.rpm
+: yum --enablerepo=elrepo-kernel install kernel-ml
+
+** CHANGE BOOT KERNEL
+ http://ask.xmodulo.com/change-default-boot-kernel-centos.html First,
+ list all available kernel images added to GRUB2 by running the
+ following command.  
+
+ ~grep '^menuentry' /boot/grub2/grub.cfg~
+
+ Identify the GRUB menu entry for the kernel that you want to set as
+ default. Each menu entry is assigned by GRUB2 a numeric value
+ starting from 0 in an increasing order. That is, the first menu entry
+ assigned 0, the second entry assigned 1, etc. For example, the menu
+ entry value for the kernel 3.10.0-327 is '2' in the above screenshot.
+
+Open /etc/default/grub with a text editor, and set GRUB_DEFAULT to the
+numeric entry value for the kernel you chose as the default. In this
+example, I choose the kernel 3.10.0-327 as the default kernel.
+
+~GRUB_DEFAULT=2~
+
+Finally, re-generate GRUB configuration.
+$ sudo grub2-mkconfig -o /boot/grub2/grub.cfg
+
+Reboot and confirm that the specified kernel is selected by GRUB2 by default.
+
+
+* Installation
+  https://wiki.centos.org/HowTos/KVM
+  
+1) Install all the packages you may need
+     : yum -y install @virt* dejavu-lgc-* xorg-x11-xauth tigervnc libguestfs-tools policycoreutils-python bridge-utils
+   
+2) If you have use any directories other than /var/lib/libvirt for kvm
+   files, set the selinux context. In this example I use /vm to store
+   my disk image files.
+     : semanage fcontext -a -t virt_image_t "/vm(/.*)?"; restorecon -R /vm
+   
+3) Allow packet forwarding between interfaces
+     : sed -i 's/^\(net.ipv4.ip_forward =\).*/\1 1/' /etc/sysctl.conf; sysctl -p
+   Normal (slow) way: 
+   vi /etc/sysctl.conf
+   net.ipv4.ip_forward = 1
+
+4) Configure libvirtd service to start automatically and reboot
+     : chkconfig libvirtd on; shutdown -r now
+   *NOTE* on systemd, ~systemctl enable libvirtd~ can be used instead
+   
+5) Optionally you can set up bridging which will allow guests to have
+   a network adaptor on the same physical lan as the host. In this
+   example eth0 is the device to support the bridge and br0 will be
+   the new device.
+     : chkconfig network on
+     : service network restart
+     : yum -y erase NetworkManager
+     : cp -p /etc/sysconfig/network-scripts/ifcfg-{eth0,br0}
+     : sed -i -e'/HWADDR/d' -e'/UUID/d' -e's/eth0/br0/' -e's/Ethernet/Bridge/' \
+     : /etc/sysconfig/network-scripts/ifcfg-br0
+     : echo DELAY=0 >> /etc/sysconfig/network-scripts/ifcfg-br0
+     : echo 'BOOTPROTO="none"' >> /etc/sysconfig/network-scripts/ifcfg-eth0
+     : echo BRIDGE=br0 >> /etc/sysconfig/network-scripts/ifcfg-eth0
+     : service network restart
+     : brctl show
+
+* USER PERMISSIONS FIX
+  https://major.io/2015/04/11/run-virsh-and-access-libvirt-as-a-regular-user/
+~/etc/polkit-1/rules.d/49-org.libvirt.unix.manager.rules
+: polkit.addRule(function(action, subject) {
+:     if (action.id == "org.libvirt.unix.manage" &&
+:         subject.isInGroup("wheel")) {
+:             return polkit.Result.YES;
+:     }
+: });
+
+* Connect using Virt-Viewer
+  ~virt-viewer --connect qemu_ssh://myhost/<VM_NAME>~
+* Virsh
+  https://www.centos.org/docs/5/html/5.2/Virtualization/chap-Virtualization-Managing_guests_with_virsh.html
+** Create A Linux KVM Template
+   1) Install CentOS
+      1) Disk Partitioning: 512MiB /boot, 5GiB /
+   2) Boot into new install
+   3) Allow SSH Access
+      1) ~vi /etc/ssh/sshd_config~ (Allow root login)
+      2) ~systemctl enable sshd~ (Enabled by default on CentOS)
+   4) Allow Virsh Console Login
+      1) ~vi /etc/default/grub~
+      2) Add ~console=ttyS0~ to the end of GRUB_CMDLINE_LINUX
+      3) Rebuild grub: ~grub2-mkconfig -o /boot/grub2/grub.cfg~
+   5) Configure Network Services
+      1) ~systemctl disable NetworkManager~
+      2) ~systemctl enable network~
+** Networking
+   | ~virsh net-create [XML_FILE]~ | Generates and starts a new network using a preexisting XML File |
+   |                               |                                                                 |
+** VNC
+   : virsh vncdisplay <DOMAIN>
+* Console
+   https://www.certdepot.net/rhel7-access-virtual-machines-console/
+   *NOTE*: The escape sequence is Ctrl+]
+** Using /etc/default/grub and rebuilding grub (easy)
+    1) SSH or Virt-Manager into the guest
+    2) Modify ~/etc/default/grub~
+       1) Add ~console=ttyS0~ to the end of GRUB_CMDLINE_LINUX
+    3) Rebuild grub: ~grub2-mkconfig -o /boot/grub2/grub.cfg~
+    4) Reboot
+    5) You will now have console access through the serial port. Use ~virsh console <DOMAIN>~ to access it
+** Modifying the grub.cfg file (harder)
+    1) Modify /boot/grub2/grub.cfg
+    2) Append ~console=ttyS0~ to every line containing ~/vmlinuz~ (The linux kernel)
+** Emergency (Lost all Links)
+    1) Destroy the VM (Kill instead of shutdown): ~virsh destroy <DOMAIN>~
+    2) Define where the virtual machine image file is located (by default /var/lib/libvirt/images): 
+       : virsh dumpxml <DOMAIN> | grep "source file="
+    3) Map your virtual machine image file into the host environment (-a for add, and -v for verbose) *NOTE:* This has to be a raw image. QCOW2 won't work:
+       : kpart -av <FULL_IMAGE_PATH>
+       - The output will look something like this:
+         : # kpartx -av /var/lib/libvirt/images/vm.example.com.img
+         : add map loop0p1 (253:2): 0 1024000 linear /dev/loop0 2048
+         : add map loop0p2 (253:3): 0 10240000 linear /dev/loop0 1026048
+    4) Mount the boot partition. Use the output of kpartx to help you. The partition listed is a mapper partition.
+       1) ~mount /dev/mapper/loop0p1 /mnt/tmp~
+    5) Now you can use the method listed previously. Append ~console=ttyS0~ to every line containing ~/vmlinuz~ (The linux kernel)
+    6) Unmount the partition, and unmap using kpartx (-d for delete, -v for verbose)
+       1) ~umount /mnt/tmp~
+       2) ~kpartx -dv <FULL_IMAGE_PATH>~
+    7) Now you can start up your vm and console in using ~virsh console <DOMAIN>~
+
+* Networking
+** Shared Host Network (For Containers and VMs)
+   *Explanation* Create a bridge and add ur interface to it. Assign L3
+     addressing to the bridge instead of the interface. This can be
+     done with multiple networks as each network would have a
+     different interface. i.e. ~eth0.11~, ~eth0.99~, ~eth0.123~ and ~br_prod~, ~br_mgmt~, ~br_dev~
+     
+*** Network Configuration - CentOS (Sysconfig)
+      */etc/sysconfig/network-scripts/ifcfg-eth0*
+  
+    : DEVICE=eth0
+    : ONBOOT=yes
+    : TYPE=Ethernet
+    : IPV6INIT=no
+    : USERCTL=no
+    : BRIDGE=br0 #This is the important line
+  
+  */etc/sysconfig/network-scripts/ifcfg-br0*
+  
+    : DEVICE=br0
+    : TYPE=Bridge
+    : BOOTPROTO=static
+    : DNS1=192.168.0.1
+    : GATEWAY=192.168.0.1
+    : IPADDR=192.168.0.100
+    : NETMASK=255.255.255.0
+    : ONBOOT=yes
+  
+* Snapshots
+   https://access.redhat.com/documentation/en-US/Red_Hat_Enterprise_Linux/7/html/Virtualization_Deployment_and_Administration_Guide/sect-Managing_guest_virtual_machines_with_virsh-Managing_snapshots.html
+   - Can use either *qemu-img* or *virsh* command
+     - *WARNING:*: Never use qemu-img against a live (running) VM. Always shutdown first.
+   - *Recommended* to use *virsh*
+   - *NOTE*: The running snapshots are located at
+     */var/lib/libvirt/qemu/snapshot/<DOMAIN>/*. (Backing/external
+     snapshots are creating in the same directory as image/command
+     run)
+   - *NOTE*: (I think) Running snapshots increase the size of the
+     image by a fair bit.
+** Merge (rebase) back together
+   http://stackoverflow.com/questions/22913384/transforming-qcows2-snapshot-plus-backing-file-into-standalone-image-file
+
+** Scenario
+    | Original Image (Backing File) | dev.img     |
+    | Snapshot                      | dev.snap    |
+    
+** Description
+   You will create a backup of the original (backing) file and the commit the snapshot changes to that image.
+
+** Steps
+   1) Make a copy of the backing file
+      : cp dev.img devplus.img
+   2) "rebase" the image file
+      : qemu-img rebase -b devplus.img dev.snap
+   3) Then you can commit the changes in the dev file back into the new base:
+      : qemu-img commit dev.snap
+      
+   Now you can use devplus.img as a standalone image file and get rid
+   of dev.img if you wish, leaving the original dev.bak intact and not
+   corrupting any other images that were based off it.
+** Internal vs External
+*** external
+    virsh-snapshot-create
+*** internal
+    virsh-snapshot-create-as
+** CentOS Live VM Snapshot Fix - Live Disk Snapshot Not Supported with this Qemu Binary
+   1) ~/etc/yum.repos.d/qemu-kvm-rhev.repo~
+      : [qemu-kvm-rhev]
+      : name=oVirt rebuilds of qemu-kvm-rhev
+      : baseurl=http://resources.ovirt.org/pub/ovirt-3.5/rpm/el7Server/
+      : 
+      : mirrorlist=http://resources.ovirt.org/pub/yum-repo/mirrorlist-ovirt-3.5-el7Server
+      : enabled=1
+      : skip_if_unavailable=1
+      : gpgcheck=0
+   2) ~yum install qemu-kvm-rhev~
+   3) Restart VM
+      
+** Revert External Snapshot
+   1) Shutdown VM: ~virsh shutdown splunk01~
+   2) ~virsh edit splunk01~
+   3) Find the disk section, and edit the ~<source file>~ to point to a previous snapshot file
+** Delete External Snapshot
+   1) ~virsh snapshot-delete splunk01 --metadata base-01~
+** Virsh Snapshots
+   - *NOTE*: Virsh will actually call QEMU commands to manage snapshots
+   - *NOTE*: Domain = VM NAME
+*** Sources
+  - [[https://www.cyberciti.biz/faq/how-to-create-create-snapshot-in-linux-kvm-vmdomain/][CyberCiti - How to create snapshots in linux with Virsh]]
+  - [[https://access.redhat.com/documentation/en-US/Red_Hat_Enterprise_Linux/6/html/Virtualization_Administration_Guide/sub-sect-Managing_guest_virtual_machines_with_virsh-Managing_snapshots.html][RedHat - Managing Snapshots with Virsh]]
+
+*** Create
+    Create a snapshot of an image. /I don't know if you need to shutdown prior, but when you don't specify ~--live~ and you specify ~--disk-only~, only the disk gets saved/
+    : virsh snapshot-create-as --domain <VM_NAME> --name <SNAPSHOT_NAME> --description <DESC> [--live] [--disk-only]
+    
+    | Option     | Description                                                                    |
+    |------------+--------------------------------------------------------------------------------|
+    | --live     | Takes a snapshot whilst the image is running. This saves the memory and state. |
+    | --disk-only | Only snapshot the disk. Don't snapshot memory                                  |
+      
+*** Live/Running
+    ~virsh snapshot-create-as splunk01 base-01 --atomic~
+*** External Snapshot (AKA Image + backing file)
+    ~virsh shutdown splunk01~
+    ~virsh snapshot-create-as splunk01 base-01 --atomic --disk-only~
+
+*** List
+    List available snapshots for an image
+    : virsh snapshot-list <VM_NAME>
+
+    See which snapshot is currently in use
+    : virsh snapshot-info <DOMAIN> --current
+*** Revert
+    *NOTE:* Be sure to shutdown the VM first with ~virsh shutdown <VM>~
+    
+    Revert to a previous snapshot
+    : virsh snapshot-revert --domain <VM> --snapshotname <SNAPSHOT_NAME> [--running]
+        - /Specify the ~--running~ option if the snapshot was saved in a "running" state/
+          
+*** Delete
+    Delete a snapshot
+    : virsh snapshot-delete <DOMAIN> <SNAPSHOT_NAME>
+
+** QEMU Snapshots 
+*** Create
+   : qemu-img create -f qcow2 -b <LATEST_IMAGE> snapshot.qcow2
+   i.e. if you had an image named Splunk01.qcow2
+     : qemu-img create -f qcow2 -b Splunk01.qcow2 Splunk01-snap01.qcow2
+     
+   *NOTE:* U run the VM using the snapshot image, not the original (backing) file. Any modification to the backing file will corrupt all forward snapshots
+           i.e. running snapshot01 would ruin snapshot02 + (assuming that snapshot 02 has it's backing file set to snapshot01)
+
+*** Create a Temporary Snapshot
+   A Temporary snapshot will write all changes to temporary files, then delete those files once the VM is shut down. No changes are saved to the original .img file
+   : qemu -hda centos-cleaninstall.qcow2 -snapshot
+
+** Delete external snapshot that can;t be deleted
+   systemctl stop libvirtd
+   rm /var/lib/libvirt/qemu/snapshots/aslkfdajs/mysnap.xml
+   systemctl start libvirtd
+* LXC
+  http://www.tecmint.com/install-create-run-lxc-linux-containers-on-centos/
+** Installation
+: yum install epel-release -y
+: yum update -y
+: yum install lxc lxc-templates debootstrap -y
+
+*NOTE:* Templates are located in /usr/share/lxc/templates
+
+To create a container:
+: lxc-create -n my_container -t centos
+** Sysctl - IP Forwarding
+   - lXC containers share sysctl. You have to add the settings on your host's sysctl then reboot your containers
+** Console Connect
+   - -t = terminal #. Connect to terminal 0
+: lxc-console -n myContainer -t 0
+* Troubleshooting
+** Cannot start network 'default'. DNSMASQ cannot read ....
+   This is an issue with selinux / apparmor not allowing you to
+   read. A quick fix would be to either a. disable dnsmasq or
+   b. disable selinux / set to permissive
+
+   A longer term fix would be to update a rule to allow reading
+** lxc-console no login prompt
+  lxc-console -n mycontainer -t 0
+  
+** LXC - Systemd-JournalD 100%CPU
+   1) Shutdown Containers
+   2) echo "lxc.kmsg = 0" >> $CONTAINER/config
+   3) Delete $CONTAINER/rootf.dev/kmsg if it's there
+   4) Restart Containers
+  
+** High CPU QEMU
+   *NOTE*: There are 2 different steps below. I am not sure if both are necessary but try step 1 first by itself.
+   *NOTE*: This is for VirtIO driver based VMs
+   *NOTE*: Also remember that Windows works significantly better when the disk image is of type 'raw' as opposed to QCOW2
+   1) Modify the VM's Parameters
+      - *Disk*
+        - Disk Bus = VirtIO
+        - Cache Mode = none
+        - IO Mode = native
+      - *Network*
+        - VirtIO
+   2) Load the VHOST_NET Module
+      - ~modprobe vhost_net~
+      - ~echo vhost_net >> /etc/modules~
+        
+** LXC - Change Container Directory
+   1) Create file /etc/lxc/lxc.conf
+   2) Add lxc.lxcpath = /mypath
+** LXC - lxc-console container not running
+   I added 'lxc.tty = 0' to the config file and restarted
+* Containers
+** Backing Up
+   1) Stop the container
+   2) Copy the container
+      1) i.e. ~tar czvf backup.tar.gz /var/lib/lxc/mycont01~
+
+** Networking
+   DO NOT USE ~systemctl restart network~
+   Instead use ~ifdown <IF>~ and ~ifup <IF>~ to update sysconfig/network-scripts/ settings
+   Also use PREFIX= instead of MASK=
+*** Change Default
+    vi /etc/lxc/default.conf
